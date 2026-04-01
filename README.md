@@ -1,6 +1,6 @@
 # Agent Orchestration Guide
 
-A comprehensive knowledge base for building AI agent orchestration systems. Contains universal patterns, real-world case studies, and code templates in TypeScript and Python — designed to be read by both humans and AI coding agents as foundational guidance.
+A comprehensive knowledge base for building AI agent orchestration systems. Contains universal patterns, real-world case studies, and code templates in TypeScript and Python, designed to be read by both humans and AI coding agents as foundational guidance.
 
 ## What This Is
 
@@ -91,7 +91,3 @@ To add a new technique:
 2. Add entries to `INDEX.md` and `DECISION_TREE.md`
 3. Optionally add code templates to `templates/`
 4. Submit a PR
-
-## License
-
-MIT
