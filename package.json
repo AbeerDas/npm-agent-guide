@@ -6,23 +6,30 @@
     "ai-agents",
     "agent-orchestration",
     "llm",
-    "coding-agents",
     "multi-agent",
     "tool-use",
     "agent-patterns",
     "mcp",
-    "context-management"
+    "context-management",
+    "claude-code",
+    "llm-tools",
+    "ai-architecture"
   ],
-  "author": "",
+  "author": "Abeer Das <abeer.das@spellbook.legal>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/AbeerDas/npm-agent-guide.git"
+  },
+  "homepage": "https://github.com/AbeerDas/npm-agent-guide#readme",
+  "bugs": {
+    "url": "https://github.com/AbeerDas/npm-agent-guide/issues"
   },
   "files": [
     "INDEX.md",
     "DECISION_TREE.md",
     "SKILL.md",
+    "README.md",
     "guides/",
     "templates/",
     "case-studies/"

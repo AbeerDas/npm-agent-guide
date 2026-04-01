@@ -1,0 +1,15 @@
+# Source material used to build this guide — not part of the published package
+Kuberwastaken claurst main spec/
+
+# Git
+.git/
+.gitignore
+
+# Editor
+.cursor/
+.vscode/
+*.DS_Store
+
+# Node
+node_modules/
+npm-debug.log*
