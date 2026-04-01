@@ -17,7 +17,7 @@ An agent is a system where an LLM operates in a loop, using tools to take action
 | Simple LLM Call | Agent |
 |----------------|-------|
 | One prompt → one response | Loop of prompts, actions, observations |
-| No side effects | Executes tools (file I/O, shell, web, etc.) |
+| No side effects | Executes tools (APIs, file I/O, shell, databases, etc.) |
 | Stateless | Maintains context across turns |
 | Human drives every step | Autonomous within boundaries |
 | Fixed capabilities | Extensible via tools and plugins |
@@ -61,29 +61,29 @@ Not all agents are the same. Here's a taxonomy of common agent architectures, fr
 ### Single-Turn Agent
 - Receives input, makes one or more tool calls, returns a response
 - No persistent state between invocations
-- Example: a CLI tool that answers a single question using web search
+- Examples: a CLI tool that answers a question using web search, an API endpoint that classifies a support ticket
 
 ### Conversational Agent
 - Maintains conversation history across multiple turns
 - User interacts back-and-forth with the agent
-- Example: a coding assistant that helps debug across multiple exchanges
+- Examples: a coding assistant, a customer support bot, a data analysis copilot
 
 ### Autonomous Agent
 - Given a high-level goal, works independently until done
 - Makes its own decisions about which tools to use and in what order
 - May plan, decompose tasks, and self-correct
-- Example: "refactor this module to use dependency injection"
+- Examples: "refactor this module," "resolve this support backlog," "generate this weekly report from our data sources"
 
 ### Multi-Agent System
 - Multiple agents collaborating or coordinating
 - A coordinator delegates tasks to specialist agents
 - Agents may run in parallel (fan-out/fan-in) or sequentially (pipeline)
-- Example: one agent plans, another implements, another reviews
+- Examples: one agent plans and another executes, one agent drafts content and another reviews it
 
 ### Orchestrated Swarm
 - Many worker agents performing similar tasks in parallel
 - A controller distributes work and aggregates results
-- Example: running the same test suite across 10 agents in parallel worktrees
+- Examples: processing a batch of documents, running parallel analyses across datasets, applying the same transformation to many files
 
 ---
 
@@ -124,7 +124,7 @@ The core execution cycle that sends context to the LLM, receives responses, exec
 → [01_agent_loop.md](01_agent_loop.md)
 
 ### 2. Tools
-Discrete capabilities the agent can use — file operations, shell execution, web access, etc. Each tool has an input schema, execution logic, and a permission model.
+Discrete capabilities the agent can use — API calls, file operations, database queries, shell execution, web access, etc. Each tool has an input schema, execution logic, and a permission model. The specific tools depend on your domain (a coding agent uses file tools; a support agent uses CRM tools; a data agent uses query tools).
 
 → [02_tool_system.md](02_tool_system.md)
 
@@ -171,12 +171,12 @@ Here is the minimum viable architecture for a useful agent:
 │                      ┌───────▼───────┐                │
 │                      │  Tool System   │               │
 │                      │               │                │
-│                      │  FileRead     │                │
-│                      │  FileWrite    │                │
-│                      │  FileEdit     │                │
-│                      │  Bash         │                │
-│                      │  Search       │                │
-│                      │  WebFetch     │                │
+│                      │  [Your domain │                │
+│                      │   tools here] │                │
+│                      │               │                │
+│                      │  e.g. Read,   │                │
+│                      │  Write, Query,│                │
+│                      │  Search, API  │                │
 │                      └───────────────┘                │
 │                                                        │
 │  ┌──────────────┐    ┌───────────────┐                │
@@ -188,11 +188,11 @@ Here is the minimum viable architecture for a useful agent:
 ### Build Order
 
 1. **Agent loop** — the core query-execute-observe cycle ([01_agent_loop.md](01_agent_loop.md))
-2. **2-3 basic tools** — FileRead, FileEdit, Bash ([02_tool_system.md](02_tool_system.md))
-3. **Simple permissions** — read-only auto-approve, writes require approval ([05_permissions_safety.md](05_permissions_safety.md))
+2. **2-3 basic tools** — whatever your domain needs: file tools for a coding agent, API tools for a support agent, query tools for a data agent ([02_tool_system.md](02_tool_system.md))
+3. **Simple permissions** — read-only auto-approve, mutations require approval ([05_permissions_safety.md](05_permissions_safety.md))
 4. **Context management** — token tracking, basic compaction ([04_context_memory.md](04_context_memory.md))
 
-This gets you a working agent. Everything else is incremental improvement.
+This gets you a working agent in any domain. Everything else is incremental improvement.
 
 ---
 

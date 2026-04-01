@@ -59,10 +59,14 @@ The startup sequence that initializes the agent from zero to ready:
 
 ### Fast-Path Optimization
 
-Before loading the full application, check for fast-path commands that don't need the full bootstrap:
+Users notice startup time more than you think. Before loading the full application, intercept fast-path commands that don't need the full bootstrap:
 - `--version` → print and exit (zero imports)
 - `--help` → print and exit
 - Simple subcommands that don't need the full tool/agent system
+
+**Parallel prefetching**: While the CLI parses the command, start loading settings, checking auth, establishing TLS connections, and pre-connecting to the API — all concurrently. Don't serialize initialization that can run in parallel.
+
+**Memoized initialization**: Expensive setup operations (tool discovery, MCP connections, config resolution) should run once and be cached for the duration of the session. If a value hasn't changed since last load, don't recompute it.
 
 ---
 
@@ -116,6 +120,41 @@ Support switching between sessions (e.g., resuming a previous conversation):
 2. Load target session state
 3. Re-establish connections
 4. Notify listeners of the switch
+
+---
+
+## Persistence and Resumability
+
+Persist everything. The cost of storage is nothing compared to the cost of lost context. Most agent products treat every session as ephemeral and it kills the user experience for long-running tasks.
+
+### What to Persist
+
+| Data | Format | Purpose |
+|------|--------|---------|
+| Conversation history | JSONL (one event per line) | Resume, audit, replay |
+| Session memory | Structured files (markdown/JSON) | Cross-session learning |
+| Tool results | Stored alongside messages | Resume without re-execution |
+| Agent state | JSON snapshot | Exact state restoration |
+| Cost/metrics | Append-only log | Billing, debugging |
+
+### JSONL for Conversation Persistence
+
+Store conversations as JSONL (JSON Lines) — one structured event per line. This format is:
+- **Append-only** — new events are added at the end (no rewriting)
+- **Streamable** — can be read incrementally
+- **Recoverable** — corruption affects only the last line, not the whole file
+- **Forkable** — branching a conversation is just copying the file and appending
+
+### Session Resume
+
+Support three levels of resume:
+1. **Continue** — pick up exactly where the user left off (same session state, same tool context)
+2. **Fork** — start a new session with the context of a previous one (branching)
+3. **Replay** — re-process a previous session's events (debugging, testing)
+
+### Lineage Tracking
+
+Track which sessions spawned which sub-sessions via `parentSessionId`. This creates a tree of session relationships useful for debugging, billing, and understanding complex multi-agent workflows.
 
 ---
 
@@ -176,4 +215,4 @@ Claude Code's state management includes:
 
 ## Tags
 
-#state #lifecycle #config #bootstrap #settings #session-state #configuration-hierarchy #settings-migrations #session-lifecycle #bootstrap-sequence #fast-path #global-state
+#state #lifecycle #config #bootstrap #settings #session-state #configuration-hierarchy #settings-migrations #session-lifecycle #bootstrap-sequence #fast-path #global-state #persistence #resumability #JSONL #parallel-prefetch #memoized-initialization

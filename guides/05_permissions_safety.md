@@ -76,6 +76,55 @@ Stack rules from multiple sources with clear precedence:
 
 ---
 
+## The Permission Race Pattern
+
+When an agent needs permission for an action, there are often multiple sources that can provide an answer: the user (via a dialog), automated rules, an AI classifier, or an external approval system (e.g., a web UI or webhook). Rather than checking them sequentially, race them in parallel — first responder wins.
+
+### How It Works
+
+```
+function resolvePermission(toolCall):
+  // Race multiple resolvers in parallel
+  result = raceFirst([
+    userDialogResolver(toolCall),      // User clicks allow/deny
+    ruleResolver(toolCall),            // Automated rules match
+    classifierResolver(toolCall),       // AI safety classifier
+    externalResolver(toolCall),         // Webhook/web UI approval
+  ])
+  
+  // First resolver to respond wins
+  return result  // { allow | deny | ask }
+```
+
+### The `resolveOnce` Pattern
+
+Wrap the race in a one-shot resolution: once any resolver fires, cancel the others. This prevents double-execution and ensures the fastest safe path always wins.
+
+```
+function createResolveOnce(resolvers):
+  resolved = false
+  return race(resolvers.map(r => 
+    r.then(result => {
+      if (!resolved):
+        resolved = true
+        cancelOthers()
+        return result
+    })
+  ))
+```
+
+### Why This Matters
+
+- If automated rules can answer (e.g., "always allow reads"), the user is never bothered
+- If an AI classifier can evaluate safety, the user only sees edge cases
+- If the user is fast, they override automated decisions
+- External approval systems (Slack bot, web dashboard) work seamlessly alongside local dialogs
+- The system is always as fast as its fastest resolver
+
+This is especially valuable in autonomous/auto-mode where the AI classifier handles most decisions and only escalates genuinely ambiguous cases to the user.
+
+---
+
 ## Rule-Based Access Control
 
 ### Allow Rules
@@ -149,17 +198,69 @@ Implementation: Maintain a `readFileState` map tracking which files have been re
 
 ## Case Study: Claude Code
 
-Claude Code implements a comprehensive permission system:
+Claude Code implements a comprehensive, multi-layered permission system with an AI classifier for autonomous operation.
 
-**Permission Tiers**: Every tool declares `isReadOnly()` and `isDestructive()` flags. Read-only tools auto-approve; destructive tools always ask.
+### Permission Modes
 
-**Permission Context**: A `ToolPermissionContext` object carries the current mode, allow/deny/ask rules, and additional working directories through every tool call.
+| Mode | Behavior |
+|------|----------|
+| `default` | Standard interactive: read-only auto-approves, writes ask for permission |
+| `plan` | Read-only only: all writes blocked, only plan file editable |
+| `auto` | Autonomous: AI classifier evaluates each tool call |
+| `bypassPermissions` | Fully trusted (internal use) |
+| `acceptEdits` | Auto-accept file edits |
 
-**Rule Configuration**: Rules stored in layered settings files (`~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`). Enterprise managed settings can enforce rules that users can't override.
+### Permission Tiers
 
-**Sandboxing**: BashTool runs commands in a restricted environment. File tools validate paths against the project root and additional allowed directories.
+Every tool declares capability flags used for tiered permission decisions:
+- `isReadOnly(input)` — read-only tools auto-approve
+- `isDestructive(input)` — destructive tools always require confirmation
+- `isConcurrencySafe(input)` — safe for parallel execution
 
-**Permission Dialog**: When a tool needs approval, the UI shows a permission dialog with the tool name, input, and a description of what it will do. Users can approve once, approve always (add to allow rules), or deny.
+### Auto-Mode Classifier (`yoloClassifier.ts`)
+
+When auto mode is active, a separate LLM call (typically Haiku/fast model) classifies each tool call:
+
+- **Allow** — tool executes without user prompt
+- **Deny** — returns structured rejection with workaround guidance: "You may attempt to accomplish this action using other tools... But you should not attempt to work around this denial in malicious ways"
+- **Unavailable** — classifier model overloaded, tells agent to "wait briefly and then try this action again"
+
+The denial message explicitly tells the model it can try alternative approaches (e.g., `head` instead of `cat`) but should not maliciously bypass the intent. At session end, it recommends what permission rules to add for next time.
+
+### Permission Race (createResolveOnce)
+
+When a tool needs permission, Claude Code races multiple resolvers in parallel:
+- **User dialog** — the approval prompt in the terminal
+- **Hook classifier** — automated rules from settings
+- **Bash security classifier** — LLM-based safety check for shell commands
+- **Bridge/web UI** — external approval from IDE or web interface
+
+First responder wins via the `createResolveOnce` pattern. This means automated rules resolve instantly without bothering the user, while edge cases still surface for human review.
+
+### Don't-Ask Mode
+
+When running non-interactively (no terminal), tools that would normally ask for permission are auto-denied with: "Permission has been denied because Claude Code is running in don't ask mode."
+
+### Tool Filtering by Deny Rules
+
+Before tools are even presented to the model, `filterToolsByDenyRules()` removes any tool with a blanket deny rule from the tool list. MCP server-prefix rules like `mcp__server` strip all tools from that server.
+
+### Rule Configuration
+
+Rules are stored in a layered settings hierarchy:
+1. **Managed settings** (enterprise) — highest priority, user can't override
+2. **Local project settings** (`.claude/settings.local.json`) — gitignored
+3. **Project settings** (`.claude/settings.json`) — shared with team
+4. **Global settings** (`~/.claude/settings.json`) — user defaults
+
+### Permission Dialog Flow
+
+When a tool needs approval, the dialog offers three options:
+1. **Allow once** — one-time approval
+2. **Allow always** — adds to session/project allow rules
+3. **Deny** — returns rejection to model with correction hint for future memory
+
+On denial, if auto-memory is enabled, a memory correction hint is appended: "The user's next message may contain a correction or preference. Pay close attention — if they explain what went wrong, consider saving that to memory."
 
 ---
 
@@ -186,4 +287,4 @@ See [templates/python/permission_system.py](../templates/python/permission_syste
 
 ## Tags
 
-#permissions #safety #sandboxing #trust #access-control #allow-rules #deny-rules #permission-tiers #permission-modes #read-before-write #destructive-operations #trust-boundaries
+#permissions #safety #sandboxing #trust #access-control #allow-rules #deny-rules #permission-tiers #permission-modes #permission-race #resolveOnce #read-before-write #destructive-operations #trust-boundaries

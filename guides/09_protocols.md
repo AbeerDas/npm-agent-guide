@@ -150,15 +150,55 @@ Persist session pointers (connection info, session IDs) to enable reconnection a
 
 ## Case Study: Claude Code
 
-Claude Code's protocol implementation includes:
+Community analysis of the source revealed a rich protocol layer with multiple transport mechanisms.
 
-**MCP Integration**: Full MCP client support with dynamic tool discovery, resource fetching, elicitation dialogs, and OAuth authentication. MCP tools are merged with built-in tools and deduplicated. An `McpAuthTool` handles MCP server authentication flows.
+### MCP Integration
 
-**Bridge Protocol**: Two-variant bridge system (V1 environment-based, V2 environment-less) connecting the CLI to claude.ai. Supports WebSocket, SSE, and hybrid transports with JWT authentication. Handles session dispatch, message polling, and crash recovery via bridge pointers.
+Full MCP client with:
+- **Dynamic tool discovery** — MCP tools are merged with built-in tools via `assembleToolPool()`, sorted for prompt cache stability (built-ins as contiguous prefix), and deduplicated by name (built-ins win conflicts)
+- **Resource fetching** — `ListMcpResources` and `ReadMcpResource` tools, with attachment-based content injection
+- **Elicitation** — URL-based auth dialogs triggered by MCP tool `-32042` errors
+- **OAuth** — `McpAuth` tool handles MCP server authentication flows
+- **Server instructions** — injected as `mcp_instructions_delta` attachments when servers connect/disconnect
+- **Unavailable tool stripping** — `stripUnavailableToolReferencesFromUserMessage()` removes references to disconnected MCP servers from tool_result content, preventing API rejections
 
-**IDE Integration**: Direct-connect bridge for VS Code and JetBrains. Extensions connect via local server, enabling live diff viewing, file selection sync, and status indicators.
+### Bridge Protocol (V1 + V2)
 
-**Remote Sessions**: Cloud-hosted sessions via the bridge protocol. Sessions persist across reconnections with session runners managing lifecycle.
+Two-variant remote control system:
+
+| Feature | V1 | V2 |
+|---------|----|----|
+| Setup | Environment-based (`BRIDGE_*` env vars) | Direct session creation, env-less |
+| Polling | `GET .../work/poll` | Push-based with `tengu_bridge_repl_v2` flag |
+| Session creation | Via environment | Programmatic |
+| Recovery | Bridge pointer file | Same + improved state sync |
+
+Supports WebSocket, SSE, and hybrid transports with JWT authentication.
+
+### UDS Inbox (Experimental)
+
+Inter-process messaging via Unix Domain Sockets:
+- One Claude Code instance messages another through UDS files
+- Used by the Coordinator to dispatch work to parallel agents
+- `ListPeers` tool discovers other running sessions
+- `SendMessage` routes via UDS when the target session is co-located
+- Works automatically when multiple sessions are running (`src/remote/`)
+
+### IDE Integration
+
+Direct-connect bridge for VS Code and JetBrains:
+- Extensions connect via local server (`cc://` URLs)
+- Live diff viewing, file selection sync, status indicators
+- The `--ide` flag enables IDE-specific behavior
+- `installGithubApp` and `installSlackApp` commands for deeper integration
+
+### Daemon Mode Transport
+
+Background sessions via tmux:
+- `--bg` flag starts a daemon session
+- Communication via tmux pane I/O
+- `claude ps` lists sessions, `claude attach` reconnects
+- Task notifications route to the parent session when complete
 
 ---
 

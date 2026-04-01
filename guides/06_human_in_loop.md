@@ -100,8 +100,8 @@ This prevents the "wall of permission dialogs" experience on first use.
 
 ### Explicit Feedback
 User directly corrects or guides the agent:
-- "No, use PostgreSQL instead of SQLite"
-- "That file path is wrong, it should be..."
+- "No, use the v2 API endpoint instead"
+- "That's the wrong customer — I meant account #4567"
 - Thumbs up/down on responses
 
 ### Implicit Feedback

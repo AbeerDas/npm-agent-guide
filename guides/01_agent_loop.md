@@ -229,15 +229,17 @@ A "turn" is one cycle of the agent loop: user input → LLM response → tool ex
 In a multi-turn conversation, the agent loop runs once per user message. But each loop iteration may itself involve multiple "inner turns" (LLM calls tools, results fed back, LLM calls more tools, etc.).
 
 ```
-User Turn 1: "Read the package.json and tell me the dependencies"
-  └── Inner Turn 1: LLM calls FileRead("package.json")
-  └── Inner Turn 2: LLM receives file content, responds with text
+User Turn 1: "Look up order #12345 and tell me its status"
+  └── Inner Turn 1: LLM calls OrderLookup("12345")
+  └── Inner Turn 2: LLM receives order data, responds with summary
 
-User Turn 2: "Update the lodash version to 5.0"
-  └── Inner Turn 1: LLM calls FileRead("package.json")  [read before write]
-  └── Inner Turn 2: LLM calls FileEdit("package.json", old, new)
-  └── Inner Turn 3: LLM receives edit confirmation, responds with summary
+User Turn 2: "Update the shipping address to 123 Main St"
+  └── Inner Turn 1: LLM calls OrderLookup("12345")  [read before write]
+  └── Inner Turn 2: LLM calls UpdateOrder("12345", {address: "123 Main St"})
+  └── Inner Turn 3: LLM receives confirmation, responds with summary
 ```
+
+The tools vary by domain (file tools for a coding agent, CRM tools for support, API tools for workflow automation), but the turn structure is identical.
 
 ---
 
@@ -299,6 +301,19 @@ Available for history: ~165,000  (82.5%)
 ```
 
 When history exceeds its allocation, trigger compaction (see [04_context_memory.md](04_context_memory.md)).
+
+---
+
+## Decouple Rendering from Agent Logic
+
+The agent loop and the rendering layer should be completely separate. The agent loop produces a stream of events (text deltas, tool calls, results, status changes). The renderer consumes that stream and presents it to the user.
+
+Why this matters:
+- **Multiple interfaces from one core** — the same agent loop can power a terminal UI, a web interface, an IDE extension, and an SDK, all from the same event stream
+- **Streaming-first rendering** — if your rendering layer handles streaming well, the UX difference is massive. Most agent products have janky streaming because they didn't invest in the rendering layer
+- **Testability** — the agent loop can be tested without any UI
+
+If your agent has a unique interaction pattern (streaming responses, tool outputs, multi-agent views), invest in the rendering layer. A custom renderer that handles streaming output, progressive tool results, and permission dialogs smoothly is a significant UX advantage.
 
 ---
 
@@ -372,39 +387,90 @@ Set a `max_budget_usd` and check after each API call. When exceeded, stop the lo
 
 ## Case Study: Claude Code
 
-Claude Code's agent loop is implemented across two files:
+Claude Code's agent loop was reverse-engineered by the community. It runs an **11-step cycle** from keypress to rendered response:
 
-**`query.ts` (69KB)** — The main async query loop function. Handles:
-- Context assembly (system prompt + history + tools + token budget)
-- Streaming API calls via the Claude client
-- Tool execution dispatch (validates, checks permissions, executes, maps results)
-- Stop hook orchestration (runs custom stop conditions after each turn)
-- Cost tracking (input/output/cache tokens, USD calculation)
-- Auto-compaction (triggers `microCompact` and `autoCompact` when budget is tight)
+```
+ 1. Input         → TextInput.tsx captures keypress (Ink React component)
+ 2. Message       → createUserMessage() wraps into Anthropic message format
+ 3. History       → Message pushed onto in-memory conversation array
+ 4. System Prompt → context.ts assembles CLAUDE.md + tool defs + memory + git status
+ 5. API Call      → query.ts streams to Claude API via Anthropic SDK (SSE)
+ 6. Token Parse   → QueryEngine.ts parses tokens as they arrive, renders live
+ 7. Tool Check    → If tool_use blocks: findToolByName() → canUseTool() → execute
+ 8. Tool Loop     → StreamingToolExecutor collects results, appends, loops to step 5
+ 9. Render        → Ink renders markdown response in terminal (Yoga flexbox)
+10. Post Hooks    → Auto-compact if too long, extract memories, run dream mode
+11. Await         → Back to REPL, waiting for next message
+```
 
-**`QueryEngine.ts` (46KB)** — A stateful class wrapping the query loop for SDK/headless use. Provides:
-- `submitQuery(prompt)` — run one agent loop
-- Dependency injection for tools, history, permissions
-- Event emission for progress tracking
-- Abort controller integration for cancellation
+### The `query()` Async Generator
 
-**Key implementation details:**
-- The loop handles up to 200K tokens of context
-- Tool results are size-capped (`maxResultSizeChars`) and truncated if too large
-- Stop hooks run after each inner turn, checked via `query/stopHooks.ts`
-- Token budget tracked by `query/tokenBudget.ts` which monitors all context components
-- Streaming events are parsed block-by-block; tool_use blocks are queued and executed after the message completes
-- Supports both interactive mode (Ink TUI renders streaming output) and headless mode (`-p` flag, outputs text/JSON)
-- Cost tracked by `cost-tracker.ts` which computes USD from per-model pricing tables
+The core loop in `query.ts` is an **async generator** — a `while(true)` loop that yields stream events, messages, and control signals. State is carried in a mutable `State` object that's reassigned at each `continue` site:
 
-**Stop conditions in Claude Code:**
-1. No more tool calls in the response (natural completion)
-2. `stop_reason: "end_turn"` from the API
-3. Token budget exceeded → auto-compact then retry
-4. Max turns reached (configurable via `--max-turns`)
-5. Cost budget exceeded (`--max-budget-usd`)
-6. User cancellation (SIGINT handler)
-7. Custom stop hooks (e.g., stop when tests pass)
+```typescript
+type State = {
+  messages: Message[]
+  toolUseContext: ToolUseContext
+  autoCompactTracking: AutoCompactTrackingState | undefined
+  maxOutputTokensRecoveryCount: number
+  hasAttemptedReactiveCompact: boolean
+  turnCount: number
+  transition: Continue | undefined  // Why the previous iteration continued
+}
+```
+
+Each iteration runs a **5-stage compaction pipeline** before the API call:
+1. **Snip** — trim specific message segments by ID
+2. **Microcompact** — truncate oversized tool results in-place
+3. **Context collapse** — progressively summarize older context
+4. **Autocompact** — full conversation summarization
+5. **Reactive compact** — emergency single-shot on API 413
+
+### Streaming Tool Execution
+
+Claude Code uses a `StreamingToolExecutor` that starts tools **as their blocks arrive** in the stream, before the response completes:
+
+- **Concurrent-safe tools** (FileRead, Grep, etc.) run in parallel
+- **Non-concurrent tools** (FileEdit, Bash) run sequentially
+- If a **Bash errors**, the `siblingAbortController` cancels all parallel siblings
+- Results are **buffered and yielded in order** to maintain message sequence
+- Progress messages stream immediately (not buffered)
+
+### Message Normalization
+
+Before each API call, `normalizeMessagesForAPI()` runs 12+ transformation passes:
+1. Reorder attachments (bubble up to nearest tool result)
+2. Filter virtual messages (display-only)
+3. Strip unavailable MCP tool references
+4. Merge consecutive user messages (API requirement)
+5. Smoosh system-reminder text into adjacent tool_results
+6. Relocate tool-reference siblings (prevent model stop-sequence imprinting)
+7. Filter orphaned thinking-only messages
+8. Filter trailing thinking blocks
+9. Filter whitespace-only assistant messages
+10. Ensure non-empty assistant content
+11. Ensure tool_use/tool_result pairing (synthetic repairs)
+12. Validate images for API size limits
+
+### Error Recovery
+
+Claude Code has multi-layered recovery:
+- **Max output tokens** — retry up to 3 times with "resume directly" instructions, plus a one-shot escalation from 8K to 64K output tokens
+- **Prompt too long (413)** — drain context collapses, then reactive compact, then surface error
+- **Model fallback** — on capacity errors, switch to fallback model with tombstone cleanup of orphaned messages
+- **Media size errors** — strip oversized images/PDFs via reactive compact
+
+### Stop Conditions (7 levels)
+
+| Priority | Condition | Action |
+|----------|-----------|--------|
+| 1 (highest) | User cancels (abort signal) | Immediate stop, synthetic REJECT_MESSAGE for pending tools |
+| 2 | Cost budget exceeded (`--max-budget-usd`) | Stop after current tool completes |
+| 3 | Token budget exceeded | Auto-continue with nudge message (up to limit) |
+| 4 | Max turns reached (`--max-turns`) | Stop and return partial result |
+| 5 | No more tool calls | Natural completion |
+| 6 | Stop hooks fire | Custom logic (hook can prevent continuation) |
+| 7 | Stop hook blocking errors | Feed errors back, continue |
 
 ---
 
@@ -432,4 +498,4 @@ See [templates/python/agent_loop.py](../templates/python/agent_loop.py) for a wo
 
 ## Tags
 
-#agent-loop #query-engine #execution-cycle #streaming #stop-conditions #turn-management #context-assembly #cost-tracking #error-handling #interactive #headless #sdk
+#agent-loop #query-engine #execution-cycle #streaming #stop-conditions #turn-management #context-assembly #cost-tracking #error-handling #interactive #headless #sdk #decoupled-rendering #event-stream

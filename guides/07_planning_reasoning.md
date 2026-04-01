@@ -160,15 +160,71 @@ After each step, verify the outcome:
 
 ## Case Study: Claude Code
 
-Claude Code implements several planning patterns:
+Community analysis of the source revealed a sophisticated planning system with multiple workflows, specialized agents, and active A/B testing.
 
-**Plan Mode**: A dedicated mode where the agent can explore the codebase (read files, search, analyze) but cannot make changes. Entered via the `EnterPlanModeTool`, exited via `ExitPlanModeV2Tool` which produces a structured plan.
+### Plan Mode V2 — Standard Workflow (5 Phases)
 
-**Todo System**: The `TodoWriteTool` maintains a session-scoped todo list. Agents create todos at the start of complex tasks and update status as they work. The system enforces that agents don't end their turn with incomplete todos.
+When plan mode is active, the system injects detailed phase instructions as `<system-reminder>` attachments:
 
-**Task Management (V2)**: A more sophisticated system with `TaskCreateTool`, `TaskGetTool`, `TaskUpdateTool`, and `TaskListTool`. Supports hierarchical tasks with assignees (for multi-agent delegation), dependencies, and status tracking.
+**Phase 1: Initial Understanding** — Launch up to N `EXPLORE_AGENT` sub-agents in parallel (single message, multiple tool calls) to efficiently explore the codebase. Guidance: "Use 1 agent when the task is isolated to known files... Use multiple agents when the scope is uncertain." Quality over quantity.
 
-**Mode Switching**: The agent can dynamically switch between plan and execute modes based on task complexity. The `hasExitedPlanMode` and `needsPlanModeExitAttachment` state flags ensure smooth transitions.
+**Phase 2: Design** — Launch `PLAN_AGENT` sub-agents to design the implementation. Can launch multiple agents in parallel for complex tasks. Each agent receives comprehensive background from Phase 1 exploration including filenames and code path traces.
+
+**Phase 3: Review** — Read critical files identified by agents. Ensure plans align with user's original request. Use `AskUserQuestion` to clarify remaining ambiguities.
+
+**Phase 4: Final Plan** — Write the plan to a dedicated plan file (the only file editable in plan mode). Must include: context section (why this change), file paths to modify, existing functions to reuse, and a verification section.
+
+**Phase 5: Exit** — Call `ExitPlanModeV2Tool`. The turn should only end with `AskUserQuestion` (for clarification) or `ExitPlanModeV2Tool` (for approval). Asking "Is this plan okay?" via text instead of the tool is explicitly prohibited.
+
+### Plan Mode V2 — Interview Workflow (Iterative)
+
+An alternative workflow gated by `isPlanModeInterviewPhaseEnabled()`:
+
+Instead of fixed phases, the model pair-plans with the user:
+1. **Explore** — use read-only tools to build context
+2. **Update plan file** — immediately capture discoveries (don't wait until the end)
+3. **Ask the user** — when hitting ambiguity, use `AskUserQuestion`, then loop back
+
+Key principles:
+- "Never ask what you could find out by reading the code"
+- "Batch related questions together"
+- "Scale depth to the task — a vague feature request needs many rounds; a focused bug fix may need one or none"
+- Start by scanning key files, write a skeleton plan, ask first questions — don't explore exhaustively before engaging
+
+### Plan Verbosity A/B Testing
+
+The Final Plan section is actively A/B tested with four variants via GrowthBook:
+
+| Variant | Key Change |
+|---------|-----------|
+| **Control** | Full plan with Context section, alternatives, verification procedures |
+| **Trim** | One-line Context, single verification command |
+| **Cut** | NO Context section ("The user just told you what they want"), one line per file |
+| **Cap** | Same as cut + "Hard limit: 40 lines. If the plan is longer, delete prose — not file paths." |
+
+### UltraPlan (Experimental)
+
+Long planning sessions on Opus-class models with up to 30-minute execution windows. Accessed via the `/ultraplan` slash command. Uses the `tengu_ultraplan` feature flag.
+
+### Auto Mode
+
+Continuous autonomous execution where the agent minimizes interruptions:
+- "Prefer making reasonable assumptions over asking questions for routine decisions"
+- "Prefer action over planning — do not enter plan mode unless the user explicitly asks"
+- An AI classifier (`yoloClassifier.ts`) evaluates each tool call for safety without user involvement
+- Classifier denial messages include workaround guidance and suggest permission rules for the future
+
+### Plan Re-entry
+
+When returning to plan mode after previously exiting, the system injects a `plan_mode_reentry` attachment instructing the model to evaluate whether the existing plan is relevant or should be overwritten. The plan file must always be edited before calling `ExitPlanModeV2Tool`.
+
+### Todo System
+
+`TodoWriteTool` maintains a flat list with `pending | in_progress | completed | cancelled` states. A `todo_reminder` attachment is injected when the tool hasn't been used recently, gently nudging the model to track progress. The reminder is never shown to the user.
+
+### Verify Plan Execution (Experimental)
+
+After plan implementation completes, a `verify_plan_reminder` attachment triggers the model to call `VerifyPlanExecution` to check that all plan items were correctly implemented.
 
 ---
 

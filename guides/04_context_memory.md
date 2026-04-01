@@ -56,6 +56,33 @@ Building the API request context follows a priority order:
 4. **Older history** — summarized or compacted versions of earlier turns
 5. **Injected context** — memory, project files, relevant documentation
 
+### Cache-Aware Prompt Splitting
+
+Split the system prompt into two sections separated by an explicit cache boundary:
+
+```
+┌──────────────────────────────────────┐
+│  STATIC SECTION (cacheable)          │  ← Rarely changes between turns
+│  - Role & identity instructions      │
+│  - Tool usage guidelines             │
+│  - Style rules & constraints         │
+│  - Domain-specific instructions      │
+│                                      │
+│  ─── cache boundary ───              │
+│                                      │
+│  DYNAMIC SECTION (per-request)       │  ← Changes every turn
+│  - Project/session context files     │
+│  - Environment info                  │
+│  - Current state (e.g., git status)  │
+│  - Memory / relevant prior context   │
+│  - Current date/time                 │
+└──────────────────────────────────────┘
+```
+
+The static section gets cached by the LLM API (typically 1-hour TTL). The dynamic section is rebuilt every turn. This dramatically reduces cost because the cached prefix doesn't get re-processed. Most agent products rebuild the entire system prompt every turn and pay full price every time — splitting saves significant money at scale.
+
+**Key principle**: Put stable instructions first (cacheable). Put dynamic context after. Keep tool definitions sorted alphabetically for cache stability (consistent ordering means more cache hits).
+
 ---
 
 ## Compaction Strategies
@@ -112,19 +139,66 @@ When injecting memories into context, score each memory against the current task
 
 ## Case Study: Claude Code
 
-Claude Code manages a 200K token context window across long coding sessions.
+Claude Code manages a 200K token context window across long coding sessions with a **5-stage compaction pipeline** that runs before every API call.
 
-**Token Budget**: Tracks usage per-component (system prompt, tools, history, results) and triggers auto-compaction at ~80% capacity.
+### System Prompt Assembly (`context.ts`)
 
-**Compaction Pipeline**: Uses a multi-stage approach:
-1. `microCompact` — truncates oversized tool results in-place
-2. `autoCompact` — triggers full conversation summarization when budget is exceeded
-3. `sessionMemoryCompact` — preserves key session facts during compaction
-4. `postCompactCleanup` — removes orphaned references after compaction
+The system prompt is assembled once per session and cached:
+1. **CLAUDE.md** — project instructions (walks up directory tree to find all CLAUDE.md files)
+2. **Tool definitions** — sorted for prompt cache stability
+3. **Git status** — branch, recent commits, working tree status
+4. **Memory files** — relevant memories scored against current task
+5. **Date** — current local date
+6. **Injected context** — IDE context, diagnostic tracking
 
-**Long-Term Memory (`memdir`)**: Stores memories as markdown files in `~/.claude/memory/`. Each file has YAML frontmatter with timestamps and tags. The `autoDream` service consolidates memories during idle periods, merging related memories and pruning stale ones.
+Additional context uses `<system-reminder>` XML tags to distinguish system-injected content from user input.
 
-**Session Memory**: Maintains a `SessionMemory` service that tracks important facts discovered during the session (e.g., project structure, test commands, coding conventions). These are persisted and re-injected on session resume.
+### Compaction Pipeline (5 Stages)
+
+Each stage runs in sequence before the API call, ordered from cheapest to most expensive:
+
+| Stage | Trigger | Strategy | Source |
+|-------|---------|----------|--------|
+| **1. Snip** | Manual or tool-invoked | Trim specific message segments by ID tag (`[id:xxx]`) | `services/compact/snipCompact.ts` |
+| **2. Microcompact** | Always (automatic) | Truncate oversized tool results in-place; cache-editing variant deletes cached tokens without re-sending | `services/compact/microCompact.ts` |
+| **3. Context Collapse** | Progressive | Summarize older context segments, replay collapsed summaries from a commit log | `services/contextCollapse/` |
+| **4. Autocompact** | Token budget ~80% | Full conversation summarization, preserving a "protected tail" of recent messages | `services/compact/autoCompact.ts` |
+| **5. Reactive Compact** | API 413 error | Emergency single-shot after prompt-too-long or media-size rejection; strips images/PDFs if needed | `services/compact/reactiveCompact.ts` |
+
+Plus two **post-turn** stages:
+- **Memory extraction** — save important facts to session memory after each response
+- **Auto-Dream** — background memory consolidation during idle periods
+
+### Token Budget Tracking
+
+The `tokenBudget.ts` module tracks cumulative output tokens per turn and enables a **+500K auto-continue** feature: when the model hits its output limit but hasn't finished, the system injects a nudge message ("Resume directly — no apology, no recap") and continues. This is distinct from the API's `task_budget` which counts total context across an agentic turn.
+
+### Snip Compaction (Experimental)
+
+Messages are tagged with short IDs (e.g., `[id:a3f2k1]`) derived deterministically from their UUIDs. The `Snip` tool lets the model trim specific segments by referencing these IDs. The snip projection (`snipProjection.ts`) produces a "snipped view" of messages for the model while the REPL keeps full history for UI scrollback.
+
+### Context Collapse
+
+Unlike autocompact (which summarizes everything), context collapse works progressively:
+- Groups older messages into collapsible segments
+- Produces summaries and replaces segments with `<collapsed>` markers
+- Stores commit log of collapses so they replay consistently across turns
+- Can recover from overflow by draining staged collapses
+
+### Long-Term Memory (`memdir`)
+
+Stores memories as markdown files in `~/.claude/memory/` with YAML frontmatter. The `autoDream` service runs during idle time:
+- **Consolidation** — merges related memories into higher-level summaries
+- **Pruning** — removes stale or superseded memories
+- **Lock** — uses a consolidation lock to prevent concurrent dream processes
+
+### Memory Relevance Prefetch
+
+At the start of each turn, a prefetch fires a side-query to score memories against the current task. Results are consumed when settled (non-blocking), injected as `relevant_memories` attachments above threshold. If unsettled by turn end, deferred to next iteration.
+
+### Tool Result Budget
+
+Aggregate tool result sizes are capped per message via `applyToolResultBudget()`. When results exceed the limit, content is replaced with a content-replacement record and the original is stored for resumption. Tools can opt out by setting `maxResultSizeChars` to Infinity.
 
 ---
 
@@ -151,4 +225,4 @@ See [templates/python/context_manager.py](../templates/python/context_manager.py
 
 ## Tags
 
-#context-window #memory #compaction #token-budget #session-memory #long-term-memory #memory-consolidation #auto-compact #micro-compact #context-assembly
+#context-window #memory #compaction #token-budget #session-memory #long-term-memory #memory-consolidation #auto-compact #micro-compact #context-assembly #cache-aware #prompt-splitting #static-dynamic

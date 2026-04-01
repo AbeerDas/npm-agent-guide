@@ -162,12 +162,47 @@ What specifically?
     └── guides/10_state_lifecycle.md §Settings Migrations
 ```
 
+### I need extensibility / hooks
+
+```
+What kind of extensibility?
+│
+├── Run custom logic before/after tool calls
+│   └── guides/02_tool_system.md §Hook and Lifecycle System
+│
+├── Let users/plugins extend the system
+│   └── guides/02_tool_system.md §Hook and Lifecycle System
+│
+└── Intercept and transform tool results
+    └── guides/02_tool_system.md §PreToolUse / PostToolUse Pattern
+```
+
+### I need to optimize cost / performance
+
+```
+What's the bottleneck?
+│
+├── API costs too high
+│   └── guides/04_context_memory.md §Cache-Aware Prompt Splitting
+│   └── guides/03_multi_agent.md §Cache-Aware Sub-Agent Spawning
+│
+├── Startup too slow
+│   └── guides/10_state_lifecycle.md §Fast-Path Optimization
+│
+├── Tool execution too slow
+│   └── guides/02_tool_system.md §Concurrency and Safety Flags
+│
+└── Context growing too large
+    └── guides/04_context_memory.md §Compaction Strategies
+```
+
 ### I want general best practices
 
 ```
 guides/11_patterns_antipatterns.md
 ├── §Proven Patterns — what works
 ├── §Anti-Patterns — what to avoid
+├── §Architecture Patterns for AI-Native Products — 11 key patterns
 ├── §Error Handling — resilience strategies
 ├── §System Prompt Design — prompt engineering for agents
 └── §Scaling Considerations — growing your agent system
@@ -183,22 +218,23 @@ guides/11_patterns_antipatterns.md
 3. `guides/02_tool_system.md` — add basic tools
 4. `templates/typescript/agent-loop.ts` or `templates/python/agent_loop.py`
 
-### Coding Agent (file ops + shell + search)
+### Domain-Specific Agent (coding, support, data, workflow, etc.)
 1. All of the above, plus:
-2. `guides/08_tool_catalog.md` — file, shell, search tools
-3. `guides/05_permissions_safety.md` — safe file/shell access
-4. `guides/06_human_in_loop.md` — user approval for writes
+2. `guides/08_tool_catalog.md` — tool catalog patterns (adapt to your domain)
+3. `guides/05_permissions_safety.md` — safe tool execution
+4. `guides/06_human_in_loop.md` — user approval for risky operations
 
 ### Multi-Agent System (coordinator + workers)
 1. All of Minimal Agent, plus:
-2. `guides/03_multi_agent.md` — orchestration patterns
+2. `guides/03_multi_agent.md` — orchestration patterns, cache-aware spawning
 3. `guides/04_context_memory.md` — shared context strategies
 4. `guides/07_planning_reasoning.md` — task decomposition
 
 ### Production Agent (full featured)
 1. Read all guides in order (00–11)
 2. Reference `case-studies/claude-code/` for a real-world example
-3. Use templates as starting points
+3. Read `guides/11_patterns_antipatterns.md §Architecture Patterns` for key production patterns
+4. Use templates as starting points
 
 ---
 

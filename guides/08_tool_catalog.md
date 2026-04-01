@@ -6,7 +6,7 @@ prerequisites: [02_tool_system]
 
 # Tool Catalog
 
-> Reference catalog of common tool patterns for agent systems: file operations, shell execution, search, web access, and specialized tools.
+> Reference catalog of common tool patterns for agent systems. While the examples here focus on file, shell, search, and web tools (common in coding agents), the design patterns — schemas, permission models, concurrency flags, result handling — apply to any tool in any domain (CRM tools, database tools, API integration tools, etc.).
 
 ---
 
@@ -178,19 +178,49 @@ Meta-tool that searches the available tool catalog for relevant capabilities. Us
 
 ---
 
-## Case Study: Claude Code
+## Case Study: Claude Code (53+ Tools)
 
-Claude Code implements 40+ tools across all categories:
+Community analysis of the Claude Code source revealed 53+ tools organized into 8 categories. Many experimental tools are feature-flagged and not yet shipped.
 
-**File Tools**: `FileReadTool`, `FileWriteTool`, `FileEditTool` — with read-before-write enforcement via `readFileState` tracking. FileEdit uses exact string matching for surgical edits.
+### Full Tool Inventory
 
-**Shell**: `BashTool` with timeout management, background process support (outputs stream to terminal files), and stateful cwd/env persistence. Commands are analyzed for destructive patterns.
+**File Operations (6):** FileRead, FileEdit, FileWrite, Glob, Grep, NotebookEdit
 
-**Search**: `GlobTool` and `GrepTool` built on ripgrep for performance. Results capped to prevent context overflow. Support recursive searching with gitignore awareness.
+**Execution (3):** Bash, PowerShell (Windows), REPL (VM-based interactive execution)
 
-**Web**: `WebFetchTool` converts pages to markdown, `WebSearchTool` returns summarized results. Both have domain-based permission rules.
+**Search & Fetch (4):** WebBrowser (experimental, full browser automation), WebFetch (HTML→markdown), WebSearch, ToolSearch (meta-tool searching the tool catalog)
 
-**Specialized**: `NotebookEditTool` for Jupyter cells, `SkillTool` for user-defined macros, `MCPTool` for dynamic MCP tools, `ToolSearchTool` for tool discovery when the full set is too large to include in context.
+**Agents & Tasks (11):** Agent (sub-agent spawning), SendMessage (mailbox/UDS communication), TaskCreate/Get/List/Update (full task CRUD), TaskStop/TaskOutput (background agent management), TeamCreate/TeamDelete, ListPeers (UDS session discovery)
+
+**Planning (5):** EnterPlanMode, ExitPlanMode, EnterWorktree (git worktree isolation), ExitWorktree, VerifyPlanExecution (plan completion check)
+
+**MCP (4):** MCPTool (dynamic tool execution), ListMcpResources, ReadMcpResource, McpAuth (OAuth handling)
+
+**System (11):** AskUserQuestion, TodoWrite, Skill (user macros), Config, RemoteTrigger, CronCreate/Delete/List (scheduled tasks), Snip (conversation trimming), Workflow (bundled scripts), TerminalCapture
+
+**Experimental (8):** Sleep (idle wait for events), SendUserMessage (Brief), StructuredOutput (JSON schema enforcement), LSP (language server integration), SendUserFile, PushNotification, Monitor (local shell task tracking), SubscribePR (GitHub webhook)
+
+### Streaming Tool Execution
+
+Claude Code's `StreamingToolExecutor` manages concurrent execution as tools stream in:
+
+- Each tool declares `isConcurrencySafe` — safe tools (Read, Grep, Glob) run in parallel
+- Non-safe tools (Edit, Write, Bash) run sequentially with exclusive access
+- If a Bash command errors, a `siblingAbortController` cancels all parallel siblings immediately
+- Results are buffered and yielded in arrival order to maintain message sequence
+- On user interrupt (Esc), pending tools receive synthetic REJECT_MESSAGE results
+
+### Tool Assembly Pipeline
+
+The registry assembles tools through a pipeline:
+1. `getAllBaseTools()` — complete list with feature-flag filtering
+2. `getTools(permissionContext)` — apply deny rules, REPL mode filtering
+3. `assembleToolPool(permissionContext, mcpTools)` — merge built-in + MCP, deduplicate, sort for cache stability
+4. Tool search deferred loading — when tool count exceeds threshold, some tools are lazy-loaded via `ToolSearchTool`
+
+### REPL Mode
+
+When enabled, primitive tools (Bash, FileRead, FileEdit, etc.) are hidden from direct use and only accessible through the REPL VM context. This provides a sandboxed execution environment.
 
 ---
 

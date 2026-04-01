@@ -86,7 +86,8 @@ One central coordinator delegates to specialist agents:
                ▼           ▼           ▼
         ┌──────────┐ ┌──────────┐ ┌──────────┐
         │  Agent A  │ │  Agent B  │ │  Agent C  │
-        │ (backend) │ │(frontend) │ │ (tests)   │
+        │(specialist│ │(specialist│ │(specialist│
+        │  domain 1)│ │  domain 2)│ │  domain 3)│
         └──────────┘ └──────────┘ └──────────┘
 ```
 
@@ -205,14 +206,16 @@ CoordinatorAgent {
 
 ### By Domain
 
-Delegate based on what part of the system the task touches:
+Delegate based on what part of the system or workflow the task touches:
 
 | Sub-Task Domain | Delegate To |
 |----------------|-------------|
-| Backend API changes | Backend specialist agent |
-| Frontend UI changes | Frontend specialist agent |
-| Database migrations | Database specialist agent |
-| Test writing | Test specialist agent |
+| Domain-specific logic | Specialist agent for that domain |
+| Data retrieval/research | Research agent with search tools |
+| Content generation | Generation agent with write tools |
+| Verification/review | Review agent with read-only tools |
+
+The domains depend on your application. A coding agent might split by backend/frontend/tests. A GTM agent might split by outreach/content/analytics. A support agent might split by triage/resolution/escalation.
 
 ### By Capability
 
@@ -220,10 +223,10 @@ Delegate based on what skills are needed:
 
 | Capability Needed | Agent Configuration |
 |-------------------|-------------------|
-| Code generation | Full tool access, code-focused prompt |
-| Code review | Read-only tools, review-focused prompt |
-| Research | Web search + file read tools only |
-| Testing | Shell + file read tools, test-focused prompt |
+| Creation/generation | Full write tool access, task-specific prompt |
+| Review/analysis | Read-only tools, review-focused prompt |
+| Research/discovery | Search + retrieval tools only |
+| Execution/verification | Execution tools, verification-focused prompt |
 
 ### By Risk Level
 
@@ -334,6 +337,38 @@ SendMessageTool {
 
 ---
 
+## Cache-Aware Sub-Agent Spawning
+
+When spawning sub-agents, design for prompt cache sharing. If multiple sub-agents share the same system prompt prefix (role instructions, tool definitions, project context), they can share the same API cache — meaning 5 parallel agents cost barely more than 1 sequential agent.
+
+### How It Works
+
+1. **Byte-identical prefix** — when forking a sub-agent, create a copy of the parent's context that is byte-identical up to the cache boundary
+2. **Same tool ordering** — sort tools alphabetically so every agent has the same tool definitions in the same order
+3. **Same static prompt** — sub-agents inherit the parent's stable system prompt without modification
+4. **Diverge only in task** — the sub-agent's unique task description goes in the dynamic section (after the cache boundary)
+
+### Three Execution Models
+
+| Model | Process | Cache | Isolation | Communication | Best For |
+|-------|---------|-------|-----------|---------------|----------|
+| **Fork** | Same process | Shared with parent | Low (shared memory) | Direct return value | Quick subtasks, cache-optimized parallel work |
+| **Teammate** | Separate process/pane | Shared prefix | Medium (own process) | File-based mailbox | Tightly coupled collaboration |
+| **Worktree** | Separate process | Shared prefix | High (own working copy) | File-based + merge | Independent tasks that might conflict |
+
+### File-Based Inter-Agent Communication
+
+For agents running as separate processes, file-based communication is simple and robust. Each agent writes to a JSON file in a known directory. Other agents poll or watch for messages. This avoids the complexity of message queues while being reliable and debuggable. The mailbox pattern:
+
+```
+~/.agent/mailbox/
+  agent-001.json    ← messages for agent 001
+  agent-002.json    ← messages for agent 002
+  team-lead.json    ← messages for coordinator
+```
+
+---
+
 ## Parallel Execution
 
 ### Identifying Parallelizable Work
@@ -373,11 +408,16 @@ function parallelWithWorktrees(tasks):
 
 ## Case Study: Claude Code
 
-Claude Code implements a comprehensive multi-agent system:
+Claude Code implements a comprehensive multi-agent system with 11 agent/task tools and several experimental features discovered in the source.
 
-**AgentTool**: Spawns sub-agents via `spawnMultiAgent()`. Each sub-agent gets its own context window, tool set, and permission context. The parent receives the sub-agent's final response as a tool result. Sub-agents can be configured with custom agent definitions (stored as markdown with YAML frontmatter in `.claude/agents/`).
+### AgentTool and Built-in Agent Types
 
-**Agent Definitions**: Agents are defined as markdown files:
+`AgentTool` spawns sub-agents via `spawnMultiAgent()`. Each sub-agent gets isolated context, tools, and permissions. Two built-in agent types are used by plan mode:
+
+- **`EXPLORE_AGENT`** — specialized for codebase research; launched in parallel during plan mode Phase 1
+- **`PLAN_AGENT`** — specialized for implementation design; produces structured plans in Phase 2
+
+Custom agents are defined as markdown files with YAML frontmatter in `.claude/agents/`:
 ```yaml
 ---
 agentType: "backend-specialist"
@@ -385,22 +425,60 @@ description: "Handles backend API changes"
 tools: ["FileRead", "FileEdit", "Bash", "Grep"]
 model: "claude-sonnet-4-6"
 permissionMode: "default"
-memory: "session"
 ---
 System prompt content here...
 ```
 
-**Coordinator Mode**: A dedicated mode (`coordinator/coordinatorMode.ts`) where the main agent orchestrates work across multiple sub-agents. The coordinator plans, delegates, and aggregates.
+### Coordinator Mode (Experimental)
 
-**Swarm Mode**: Parallel worker agents for batch processing. Multiple agents work in parallel, each in their own context.
+A lead agent breaks tasks apart and spawns parallel workers in isolated git worktrees (`coordinator/coordinatorMode.ts`). Key characteristics:
+- The coordinator has a **restricted tool set** — primarily Agent, TaskStop, SendMessage
+- Workers get full tool access (Bash, Read, Edit, etc.) but within their worktree
+- Communication via `SendMessage` through a shared teammate mailbox (`utils/teammateMailbox.ts`)
+- The coordinator injects team context: team name, agent name, task list path, team config path
+- Workers are told to message "team-lead" by name, never by UUID
 
-**Team System**: `TeamCreateTool`, `TeamDeleteTool`, `SendMessageTool` — create teams of agents that can communicate via a shared mailbox. The `context/mailbox.tsx` provides the mailbox implementation.
+### Daemon Mode (Experimental)
 
-**Task Management**: `TaskCreateTool`, `TaskGetTool`, `TaskUpdateTool`, `TaskListTool` — full task CRUD with status tracking, assignees, and dependencies. `TaskStopTool` and `TaskOutputTool` for managing background agents.
+Run sessions in the background with `--bg`. Uses tmux under the hood:
+- Sessions persist as tmux panes
+- Managed via `claude ps` (list), `claude logs` (view output), `claude attach` (resume), `claude kill` (stop)
+- The `BG_SESSIONS` feature flag gates this functionality
+- Background sessions generate periodic task summaries for `claude ps` display
 
-**Background Agents**: Long-running agents write output to terminal files. The parent can monitor progress, read output, or cancel via `TaskOutputTool` and `TaskStopTool`.
+### UDS Inbox (Experimental)
 
-**Worktree Support**: `EnterWorktreeTool` and `ExitWorktreeTool` enable agents to work in isolated git worktrees. Combined with tmux, enables parallel agents in separate worktrees.
+Unix Domain Socket-based inter-session communication:
+- One Claude Code instance can message another through UDS
+- Used by the Coordinator to dispatch work to parallel agents
+- `ListPeers` tool discovers connected sessions
+- `SendMessage` routes through UDS when sessions are co-located
+- Works automatically when multiple sessions are running
+
+### Team System
+
+`TeamCreateTool` + `TeamDeleteTool` + `SendMessageTool` — create multi-agent teams:
+- Teams have a lead coordinator and specialized workers
+- Each member gets a defined role and agent type
+- Communication uses a shared mailbox with message buffering
+- The `isAgentSwarmsEnabled()` flag gates team tools
+
+### Task Management (V2)
+
+Full CRUD via `TaskCreate/Get/Update/List` tools with:
+- Status tracking (pending, running, completed, failed, killed)
+- Agent assignment (tasks addressed to specific agentIds)
+- Dependency tracking between tasks
+- Background task output via terminal files (`TaskOutputTool`)
+- The `isTodoV2Enabled()` flag distinguishes V2 tasks from the flat TodoWrite system
+
+### Message Routing
+
+The message queue (`utils/messageQueueManager.ts`) routes mid-turn messages:
+- Main thread drains only messages with `agentId === undefined`
+- Sub-agents drain only task-notifications with their own agentId
+- Slash commands are excluded from mid-turn drain (processed post-turn)
+- The Sleep tool triggers drain of lower-priority notifications
 
 ---
 
@@ -429,4 +507,4 @@ See [templates/python/sub_agent.py](../templates/python/sub_agent.py) for a work
 
 ## Tags
 
-#multi-agent #orchestration #sub-agents #delegation #coordination #coordinator #swarm #fan-out #fan-in #pipeline #team #background-agents #parallel-execution #worktree #task-management #agent-definitions #agent-tool
+#multi-agent #orchestration #sub-agents #delegation #coordination #coordinator #swarm #fan-out #fan-in #pipeline #team #background-agents #parallel-execution #worktree #task-management #agent-definitions #agent-tool #cache-sharing #file-based-communication #fork-teammate-worktree

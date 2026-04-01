@@ -225,6 +225,108 @@ Design tools so that identical inputs produce identical results when called mult
 
 ---
 
+## Architecture Patterns for AI-Native Products
+
+These are high-level architecture patterns observed in production agent systems. They apply to any AI product — coding agents, support bots, workflow tools, data pipelines, GTM automation, or any LLM-powered application.
+
+### 1. Fast-Path Your Entry Points
+
+Don't load everything upfront. Intercept simple commands (`--version`, `--help`, health checks) before the full application initializes. Users notice startup time more than you think.
+
+- Fast-path routing: simple requests handled before full app loads
+- Parallel prefetching: while parsing the command, prefetch auth, config, TLS, and API connections concurrently
+- Memoized initialization: expensive setup operations run once and are cached
+
+→ See [10_state_lifecycle.md §Bootstrap](10_state_lifecycle.md) for implementation details.
+
+### 2. Invest in Your Streaming/Rendering Layer
+
+If your AI product has streaming responses, tool outputs, or multi-agent views, the rendering layer is the UX. Decouple rendering from agent logic completely — the agent loop produces an event stream, the renderer consumes it.
+
+- Separate the agent loop from the UI (same core powers terminal, web, IDE, SDK)
+- Handle streaming tokens, progressive tool results, and permission dialogs smoothly
+- Invest in this layer early — a custom renderer that handles streaming well is a massive UX advantage
+
+→ See [01_agent_loop.md §Decouple Rendering](01_agent_loop.md) for more.
+
+### 3. Async Generator State Machines for Agent Loops
+
+The agent loop should be an async generator (or equivalent) that yields events as they occur. The `for await (event of query(...))` pattern cleanly separates "produce events" from "consume events." Keep the loop stages distinct:
+
+1. Normalize context
+2. Build system prompt
+3. Call the model
+4. Collect tool calls
+5. Execute tools
+6. Append results
+7. Check stop conditions
+
+Most agent products mash these together and end up with spaghetti. Separate them cleanly.
+
+→ See [01_agent_loop.md](01_agent_loop.md) for the full pattern.
+
+### 4. Partition Tool Execution: Parallel Reads, Serial Writes
+
+When the model returns multiple tool calls, partition them by safety:
+- **Concurrent batch** — read-only, concurrency-safe tools run in parallel
+- **Serial batch** — mutating tools run sequentially
+
+Each tool goes through: input validation → pre-hooks → permission check → execution → post-hooks → result truncation. Most agent products run everything serially and it's unnecessarily slow.
+
+→ See [02_tool_system.md §Concurrency](02_tool_system.md) for details.
+
+### 5. Race Multiple Permission Resolvers
+
+Don't just ask the user every time. Race multiple resolvers in parallel: user dialog, automated rules, AI classifier, external approval system. First safe answer wins. This means the fastest safe path always wins.
+
+→ See [05_permissions_safety.md §Permission Race Pattern](05_permissions_safety.md) for the `resolveOnce` implementation.
+
+### 6. Tiered Context Compression, Not Just Truncation
+
+Most products just truncate from the top when context fills up. That's the least intelligent approach. Build tiered compression ordered from least lossy to most lossy:
+
+1. Micro-compact (truncate oversized tool results)
+2. Selective compression (summarize specific segments)
+3. Session memory extraction (save key facts externally)
+4. Full compaction (summarize entire history)
+5. Last-resort truncation (drop oldest messages)
+
+The difference between a product that "loses context" and one that "remembers everything" is this engineering.
+
+→ See [04_context_memory.md §Compaction Strategies](04_context_memory.md) for the full pipeline.
+
+### 7. Split System Prompts: Static (Cached) + Dynamic (Per-Turn)
+
+If you're sending system prompts to an LLM API, split them in two. Stable instructions first (cacheable, rarely changes). Dynamic context after (rebuilt every turn). Put an explicit cache boundary between them. This dramatically reduces API costs because the cached prefix doesn't get re-processed.
+
+→ See [04_context_memory.md §Cache-Aware Prompt Splitting](04_context_memory.md) for the pattern.
+
+### 8. Design Sub-Agent Spawning Around Cache Sharing
+
+If you're building a multi-agent system, think about cache topology. Sub-agents that share the same system prompt prefix (role + tools + project context) share the same API cache. Design your agent spawning to maximize cache hits — 5 parallel agents with shared prefixes cost barely more than 1 sequential agent.
+
+→ See [03_multi_agent.md §Cache-Aware Sub-Agent Spawning](03_multi_agent.md) for details.
+
+### 9. Build Hooks From Day One
+
+Even if you don't use them immediately, the ability to run custom logic before/after every tool call, every message, every session is what turns a product into a platform. Your power users will build things on top of your hooks that you never imagined. Hooks > plugins > hardcoded features.
+
+→ See [02_tool_system.md §Hook and Lifecycle System](02_tool_system.md) for the pattern.
+
+### 10. Persist Everything, Make Sessions Resumable
+
+Persist conversations, tool results, and agent state. Make it resumable. The cost of storage is nothing compared to the cost of lost context. Most AI products treat every session as ephemeral and it kills the user experience for long-running tasks.
+
+→ See [10_state_lifecycle.md §Persistence and Resumability](10_state_lifecycle.md) for implementation.
+
+### 11. Make Permissions Configurable, Not Binary
+
+A 5-level rule cascade with auto-classifiers is way more sophisticated than "allow all" or "ask every time." Your users have different risk tolerances. Let them configure it. Layer rules from enterprise policy (highest priority) down to user defaults (lowest).
+
+→ See [05_permissions_safety.md](05_permissions_safety.md) for the full tier model.
+
+---
+
 ## Case Study: Claude Code
 
 Claude Code embodies many of these patterns:
@@ -245,4 +347,4 @@ Claude Code embodies many of these patterns:
 
 ## Tags
 
-#patterns #anti-patterns #best-practices #pitfalls #error-handling #retry #rate-limiting #idempotency #system-prompt #resilience #scaling #read-before-write #graceful-degradation #progressive-disclosure #prompt-caching
+#patterns #anti-patterns #best-practices #pitfalls #error-handling #retry #rate-limiting #idempotency #system-prompt #resilience #scaling #read-before-write #graceful-degradation #progressive-disclosure #prompt-caching #architecture-patterns #fast-path #cache-aware #hooks-as-platform #parallel-reads-serial-writes #tiered-compression #decoupled-rendering #persistence

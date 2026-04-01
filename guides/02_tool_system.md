@@ -169,11 +169,13 @@ Key steps:
 
 Define presets for different use cases:
 
-| Preset | Tools | Use Case |
-|--------|-------|----------|
-| `minimal` | FileRead, FileEdit, Bash | Simple tasks, low token overhead |
-| `standard` | All file/shell/search tools | Typical coding tasks |
-| `full` | Everything including MCP tools | Complex tasks needing all capabilities |
+| Preset | Example Tools | Use Case |
+|--------|---------------|----------|
+| `minimal` | 2-3 core domain tools | Simple tasks, low token overhead |
+| `standard` | All primary domain tools | Typical tasks |
+| `full` | Everything including MCP/plugin tools | Complex tasks needing all capabilities |
+
+A coding agent's standard set includes file and shell tools. A support agent's standard set includes ticket, knowledge base, and CRM tools. The preset pattern applies regardless of domain.
 
 ---
 
@@ -371,31 +373,122 @@ Support allowlists and denylists from the command line:
 
 ---
 
+## Hook and Lifecycle System
+
+Hooks are the mechanism that turns an agent product into an agent platform. By exposing lifecycle events that custom logic can intercept, you let users extend the system without modifying the core.
+
+### Lifecycle Events
+
+Define hook points at every critical juncture in the agent's execution:
+
+| Hook Point | When It Fires | What It Can Do |
+|------------|---------------|----------------|
+| **PreToolUse** | Before a tool executes | Block, modify input, inject context, redirect to a different tool |
+| **PostToolUse** | After a tool returns | Transform results, trigger side effects, log analytics |
+| **UserPromptSubmit** | When user submits a message | Inject context into every message, validate input, route |
+| **AgentSpawn** | When a sub-agent is created | Modify sub-agent config, inject instructions, restrict tools |
+| **SessionStart** / **SessionEnd** | Session lifecycle boundaries | Initialize resources, persist state, clean up |
+
+### Hook Types
+
+Support multiple hook sources so different integration levels can participate:
+
+| Hook Type | Source | Use Case |
+|-----------|--------|----------|
+| **Command hooks** | Shell commands triggered by events | Run linters, formatters, external scripts |
+| **Function hooks** | In-process callbacks (SDK integration) | Low-latency, typed responses |
+| **HTTP hooks** | Webhook calls to external services | External approval systems, logging services |
+| **Prompt hooks** | LLM-based classifiers or evaluators | Content filtering, safety checks |
+| **Plugin hooks** | Registered from plugin/MCP manifests | Third-party extensions |
+
+### Hook Design Principles
+
+1. **Hooks should be non-blocking by default** — if a hook fails, the operation should continue unless the hook explicitly requests a block
+2. **Hooks should be chainable** — multiple hooks at the same lifecycle point run in priority order
+3. **Hooks should be discoverable** — the system should report which hooks are active and what they do
+4. **Build hooks from day one** — even if you don't use them immediately, the ability to run custom logic before/after every tool call, every message, every session is what turns a product into a platform
+
+### PreToolUse / PostToolUse Pattern
+
+These are the most powerful hooks for tool execution:
+
+```
+PreToolUse(toolName, input, context):
+  // Return: { action: 'allow' } — proceed normally
+  //         { action: 'block', reason: string } — prevent execution
+  //         { action: 'modify', newInput: {...} } — rewrite the input
+  //         { action: 'redirect', toolName: string, input: {...} } — use a different tool
+
+PostToolUse(toolName, input, result, context):
+  // Return: { result: transformedResult } — modify what the LLM sees
+  //         { sideEffects: [...] } — trigger additional actions
+```
+
+This pattern lets users inject domain-specific validation, enforce organizational policies, add logging/analytics, and integrate with external systems — all without touching the core agent loop.
+
+---
+
 ## Case Study: Claude Code
 
-Claude Code's tool system is one of the most comprehensive in production:
+Community analysis of the source revealed 53+ tools and a sophisticated execution pipeline.
 
-**Tool Interface** (`Tool.ts`, 30KB): A `Tool<Input, Output, Progress>` generic type with ~20 fields covering identity, schema, metadata, capability flags, execution, UI rendering, and output mapping. The `buildTool()` factory fills in defaults, so simple tools need only a few fields.
+### Tool Assembly Pipeline
 
-**Tool Registry** (`tools.ts`, 17KB): `getAllBaseTools()` returns 30+ tools in a fixed order (synced with caching config). `getTools()` applies deny rules and supports a `CLAUDE_CODE_SIMPLE` mode with just `[Bash, FileRead, FileEdit]`. `assembleToolPool()` merges built-in + MCP tools, sorts by name, and deduplicates.
+Tools are assembled through a 4-step pipeline:
 
-**40+ Tool Implementations**: Organized by category in `src/tools/`:
-- **File**: FileRead, FileWrite, FileEdit (with read-before-write enforcement)
-- **Shell**: Bash, PowerShell
-- **Search**: Glob (ripgrep-based), Grep (ripgrep)
-- **Agent**: AgentTool (sub-agent spawning), TeamCreate, TeamDelete, SendMessage
-- **Task**: TodoWrite (V1), TaskCreate/Get/Update/List (V2), TaskStop, TaskOutput
-- **Web**: WebFetch (HTML→markdown), WebSearch
-- **MCP**: MCPTool (dynamic), McpAuth, ListMcpResources, ReadMcpResource
-- **Plan**: EnterPlanMode, ExitPlanModeV2
-- **Meta**: ToolSearch, AskUserQuestion
-- **Special**: Notebook, Worktree, Cron, Config, REPL, LSP, Skill, Brief, Sleep
+1. **`getAllBaseTools()`** — returns all tools with feature-flag filtering (`feature()` compile-time gates + `process.env` checks). Must stay in sync with Statsig global caching config for prompt cache stability.
+2. **`getTools(permissionContext)`** — applies deny rules via `filterToolsByDenyRules()`. Supports `CLAUDE_CODE_SIMPLE` mode (just Bash, FileRead, FileEdit). When REPL mode is enabled, hides primitive tools.
+3. **`assembleToolPool(permissionContext, mcpTools)`** — merges built-in + MCP tools. Built-ins sorted as contiguous prefix for cache stability, MCP tools sorted after. `uniqBy('name')` ensures built-ins win on conflict.
+4. **Tool search deferred loading** — when `isToolSearchEnabledOptimistic()` is true, some tools get `shouldDefer` flag and are loaded only when `ToolSearchTool` finds them relevant.
 
-**Permission System**: Each tool implements `checkPermissions()` returning allow/ask/deny decisions. `ToolPermissionContext` carries the mode, allow/deny/ask rules, and additional working directories. Permission modes: `default`, `plan`, `auto`, `bypassPermissions`, `acceptEdits`.
+### 53+ Tools by Category
 
-**Execution Context**: `ToolUseContext` provides tools with app state, abort controller, read-file tracking, permission callbacks, agent context, and UI injection hooks.
+- **File (6)**: FileRead, FileWrite, FileEdit, Glob, Grep, NotebookEdit
+- **Execution (3)**: Bash, PowerShell (Windows), REPL (VM context)
+- **Search & Fetch (4)**: WebBrowser (experimental), WebFetch, WebSearch, ToolSearch
+- **Agents & Tasks (11)**: Agent, SendMessage, TaskCreate/Get/List/Update, TaskStop, TaskOutput, TeamCreate/Delete, ListPeers
+- **Planning (5)**: EnterPlanMode, ExitPlanModeV2, EnterWorktree, ExitWorktree, VerifyPlanExecution
+- **MCP (4)**: MCPTool, ListMcpResources, ReadMcpResource, McpAuth
+- **System (11)**: AskUserQuestion, TodoWrite, Skill, Config, RemoteTrigger, CronCreate/Delete/List, Snip, Workflow, TerminalCapture
+- **Experimental (8)**: Sleep, Brief (SendUserMessage), StructuredOutput, LSP, SendUserFile, PushNotification, Monitor, SubscribePR
 
-**Result Handling**: Each tool has `maxResultSizeChars` (optional). Results are mapped to API format via `mapToolResultToToolResultBlockParam()`. Large results are truncated with context-appropriate truncation strategies.
+### Streaming Tool Executor
+
+The `StreamingToolExecutor` class (`services/tools/StreamingToolExecutor.ts`) manages concurrent tool execution as tools arrive during streaming:
+
+- Tools are added via `addTool()` as `tool_use` blocks arrive in the stream
+- Each tool declares `isConcurrencySafe` — parsed from its Zod schema at add time
+- Concurrent-safe tools (FileRead, Grep, etc.) execute in parallel via `Promise.all`
+- Non-concurrent tools (FileEdit, Bash) execute sequentially with exclusive access
+- If a Bash tool errors, `siblingAbortController` fires — canceling all in-flight sibling subprocesses immediately
+- Results are **buffered and yielded in order** via `getCompletedResults()` (synchronous) and `getRemainingResults()` (async generator)
+- Progress messages bypass the buffer and yield immediately
+- On discard (streaming fallback), all pending tools receive synthetic error results
+
+### Hook System (25+ Lifecycle Events)
+
+Claude Code implements hooks at 25+ lifecycle points with 5 hook types (command, prompt, agent, HTTP, function). Hooks can come from settings, plugins, agent frontmatter, or SDK callbacks:
+
+- **PreToolUse** — can block or modify tool calls before execution. Used for custom validation, security policies, and organizational rules
+- **PostToolUse** — can transform tool results. Used for logging, analytics, and result processing
+- **UserPromptSubmit** — can inject context into every user message. Used for adding project-specific context
+- Hook sources: settings files, plugin manifests, agent frontmatter (YAML), and SDK callbacks
+- Hooks are chainable — multiple hooks at the same lifecycle point run in priority order
+
+### Tool Input Normalization
+
+The `normalizeToolInput()` function corrects model output quirks:
+- Parses stringified JSON from streaming (recursive parsing for nested stringification)
+- Tool-specific corrections via `backfillObservableInput()`
+- Legacy tool name mapping via `normalizeLegacyToolName()`
+- Logs diagnostic telemetry on JSON parse failures
+
+### Tool Result Budget
+
+`applyToolResultBudget()` caps aggregate tool result sizes across messages:
+- Per-tool limit via `maxResultSizeChars` (tools can opt out with Infinity)
+- Content replaced with replacement records; originals stored for session resume
+- Runs before microcompact — cache editing is invisible to it
 
 ---
 
@@ -423,4 +516,4 @@ See [templates/python/tool_registry.py](../templates/python/tool_registry.py) fo
 
 ## Tags
 
-#tool-design #tool-registry #schemas #tool-execution #input-validation #permission-check #tool-result #concurrency-safety #tool-discovery #tool-presets #buildTool #tool-context #mcp-tools
+#tool-design #tool-registry #schemas #tool-execution #input-validation #permission-check #tool-result #concurrency-safety #tool-discovery #tool-presets #buildTool #tool-context #mcp-tools #hooks #lifecycle-events #PreToolUse #PostToolUse
